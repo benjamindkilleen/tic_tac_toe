@@ -125,14 +125,16 @@ class QAgent(Agent):
     return 0 * np.ones(9, np.float32)
   
   def quality_function(self, board_state):
-    return self.qtables.setdefault(board_state, self.get_initial_qtable())
+    if board_state not in self.qtables:
+      self.qtables[board_state] = self.get_initial_qtable()
+    return self.qtables[board_state]
 
   # 012
   # 345
   # 678
   rotate_action = [2, 5, 8, 1, 4, 7, 0, 3, 6]
   
-  def update(self, board_state, action, new_board_state):
+  def update(self, board_state, action, new_board_state, verbose=False):
     """Update the agent using the transition.
 
     Note that this is not one move later but two moves later, since it's for the same agent.
@@ -148,18 +150,20 @@ class QAgent(Agent):
     for k in range(4):          # bug here, because action isn't being rotated for k > 0
       if board_state not in self.qtables:
         self.qtables[board_state] = self.get_initial_qtable()
-
+      if new_board_state not in self.qtables:
+        self.qtables[new_board_state] = self.get_initial_qtable()
+        
       if new_board_state.done:
         self.qtables[board_state][action] = new_board_state.reward
-        print(f'updating player {new_board_state.player} with reward {self.qtables[board_state][action]} from action {action}, based on board\n{board_state}\n    |\n    V\n{new_board_state}')
-        # print(f'{board_state} gave player {board_state.player} reward {new_board_state.reward} for move {action}')
+        if verbose:
+          print(f'updating player {new_board_state.player} with reward {self.qtables[board_state][action]} '
+                f'from action {action}, based on board\n{board_state}\n    |\n    V\n{new_board_state}')
       else:
-        self.qtables[board_state][action] = ((1 - self.alpha) * self.qtables[board_state][action]
+        self.qtables[board_state][action] = ((1 - self.alpha) * self.quality_function(board_state)[action]
                                              + self.alpha * self.gamma * np.max(self.quality_function(new_board_state)))
-        
-        print(f'updating player {new_board_state.player} with q value {self.qtables[board_state][action]} from action {action}, based on board\n{board_state}\n    |\n    V\n{new_board_state}')
-      # self.qtables[board_state][action] += self.alpha * (
-      #   new_board_state.reward + self.gamma * np.max(self.quality_function(new_board_state)) - self.qtables[board_state][action])
+        if verbose:
+          print(f'updating player {new_board_state.player} with q value {self.qtables[board_state][action]} '
+                f'from action {action}, based on board\n{board_state}\n    |\n    V\n{new_board_state}')
 
       board_state = board_state.rotate()
       new_board_state = new_board_state.rotate()
@@ -208,6 +212,9 @@ class BoardState(object):
     
   def other_player(self):
     return BoardState(self.board, player=self.next_player)
+
+  def copy(self):
+    return BoardState(self.board, player=self.player)
     
   def do(self, action):
     assert action in self.action_space, f'{action} in {self.action_space}'
@@ -234,13 +241,6 @@ class BoardState(object):
     empty = board == 0
     p1 = board == 1 
     p2 = board == 2
-
-    # def is_winner(player):
-    #   p = board == player
-    #   return (np.any(np.all(p, axis=0))          # |
-    #           or np.any(np.all(p, axis=1))       # --
-    #           or np.all(np.diag(p))              # \
-    #           or np.all(np.diag(np.fliplr(p))))  # /
  
     def is_winner(p):
       return (np.any(np.all(p, axis=0))          # |
@@ -283,6 +283,9 @@ class BoardState(object):
   def __hash__(self):
     state_string = 'T' if self.done else ''.join('{:d}'.format(int(i)) for i in self.board)
     return hash(state_string)
+
+  def __eq__(self, other):
+    return np.all(self.board == other.board)
         
   def rotate(self, k=1, inplace=True):
     """rotate the board clockwise 90 degrees k times.
@@ -349,7 +352,6 @@ class Game(object):
       board_state = BoardState()
       for t in itertools.count():
         pidx = board_state.player - 1
-        # print(f'Turn {t}:\n{board_state}')
         if board_state.done:
           if verbose:
             winner = 'None (tie)' if board_state.winner == 0 else f'Player {board_state.winner} ({self.agents[board_state.winner - 1].name})'
@@ -368,26 +370,23 @@ class Game(object):
   def train(self, games=1, verbose=False):
     wins = np.zeros(3, np.int)
     for game in range(games):
-      if game > 0 and game % 100 == 0:
+      if game > 0 and game % 10 == 0:
         self.report_wins(game, wins)
-        
-      # (board, action, reward, new_board) for each player
-      transitions = [[None] * 3] * 2
-      
+
+      # (board, action, new_board) for each player
+      transitions = [[None, None, None], [None, None, None]]
+
       board_state = BoardState()
       for t in itertools.count():
         pidx = board_state.player - 1
         other_pidx = board_state.next_player - 1
         agent = self.agents[pidx]
         other_agent = self.agents[other_pidx]
-        # print(f'Turn {t}:\n{board_state}')
 
         if t > 1:
           transitions[pidx][2] = board_state
-          print('regular update')
           agent.update(*transitions[pidx])
-        print(*transitions[0], sep='\n=======\n')
-        
+
         action = agent(board_state, training=True)
         new_board_state = board_state.do(action)
         
@@ -395,20 +394,16 @@ class Game(object):
         # so other_pidx is just finding out how her first move went.
         transitions[pidx][0] = board_state
         transitions[pidx][1] = action
-        # print(transitions[pidx][0])
-        # transitions[other_pidx][2] = new_board_state
 
-        # so pidx just took her turn and won. That means the new_board_state has player other_pidx and reward 0.
-        # but then pidx trains on new_board_state.other_player()
-        
         if new_board_state.done:
           # update the other player, who just lost or won, on the end of the game.
-          print('final update')
-          transitions[other_pidx][2] = new_board_state.other_player()
-          agent.update(*transitions[other_pidx])
+          transitions[other_pidx][2] = new_board_state
+          other_agent.update(*transitions[other_pidx])
+
+          transitions[pidx][2] = new_board_state.other_player()
+          agent.update(*transitions[pidx])
 
           if verbose:
-            print(new_board_state)
             winner = 'None (tie)' if new_board_state.winner == 0 else f'Player {new_board_state.winner} ({self.agents[new_board_state.winner - 1].name})'
             print(f'Finished game {game} in {t} turns. Winner: {winner}.')
             
@@ -429,25 +424,10 @@ if __name__ == '__main__':
   if True:
     qagent = QAgent()
     game = Game(qagent)
-    game.train(50000)
+    game.train(1000)
     qagent.save('qagent.pkl')
   else:
     qagent = QAgent.load('qagent.pkl')
 
-  # if True:
-  #   qagent = EpsilonQAgent()
-  #   game = Game(qagent)
-  #   game.train(500000)
-  #   qagent.save('eps_qagent.pkl')
-  # else:
-  #   qagent = EpsilonQAgent.load('eps_qagent.pkl')
-
-  # Game(top_left_agent, user).train(100, verbose=True)
   Game(qagent, user).train(100, verbose=True)
-  
-  # Game(eps_qagent).play(500)
-  # Game(eps_qagent, random_agent).play(500)
-  # Game(qagent).play(500)
-  # Game(qagent, random_agent).play(500)
-  # Game(random_agent).play(500)
   
