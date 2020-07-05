@@ -1,6 +1,7 @@
 import numpy as np
 import itertools
 import pickle
+import tensorflow as tf
 from tensorflow import keras
 
 
@@ -66,11 +67,11 @@ class UserAgent(Agent):
       keypress = input('>>> ')
       if keypress in self.keypresses:
         action = self.keypresses[keypress]
-        break
-      
-      if keypress.isdigit() and int(keypress) in board_state.action_space:
+      elif keypress.isdigit() 
         action = int(keypress)
-        break      
+
+      if action in board_state.action_space:
+        break
 
       print(f'Choose a valid move: {board_state.action_space}')
       print(board_state)
@@ -111,15 +112,15 @@ class QAgent(Agent):
     self.gamma = gamma
     self.alpha = 0.1
 
-  def save(self, path):
+  def save(self, path='qtables.pkl'):
     with open(path, 'wb') as file:
       pickle.dump(self.qtables, file)
 
   @classmethod
-  def load(cls, path):
+  def load(cls, path='qtables.pkl', **kwargs):
     with open(path, 'rb') as file:
       qtables = pickle.load(file)
-    return cls(qtables=qtables)
+    return cls(qtables=qtables, **kwargs)
 
   def get_initial_qtable(self):
     return 0 * np.ones(9, np.float32)
@@ -147,7 +148,7 @@ class QAgent(Agent):
 
     """
 
-    for k in range(4):          # bug here, because action isn't being rotated for k > 0
+    for k in range(4):
       if board_state not in self.qtables:
         self.qtables[board_state] = self.get_initial_qtable()
       if new_board_state not in self.qtables:
@@ -170,9 +171,48 @@ class QAgent(Agent):
       action = self.rotate_action[action]
       
 
+class NeuralAgent(Agent):
+  def __init__(self, model=None, gamma=0.95, alpha=0.9):
+    if model is None:
+      self.model = keras.Sequential()
+      self.model.add(keras.layers.Dense(1024, input_dim=(3 * 9), activation='relu'))  # input space is environment
+      self.model.add(keras.layers.BatchNormalization())
+      self.model.add(keras.layers.ReLU())
+      self.model.add(keras.layers.Dense(1024))
+      self.model.add(keras.layers.BatchNormalization())
+      self.model.add(keras.layers.ReLU())      
+      self.model.add(keras.layers.Dense(9))  # output space is actions
+
+      self.model.compile(optimizer=keras.optimizers.SGD(learning_rate=0.9), loss='mse')
+    else:
+      self.model = model
+
+    self.alpha = alpha
+    self.gamma = gamma
+
+  def save(self, model_dir='model'):
+    self.model.save(model_dir)
+
+  @classmethod
+  def load(cls, fname='model', **kwargs):
+    return cls(keras.models.load_model(fname), **kwargs)
+    
+  def quality_function(self, board_state):
+    x = tf.reshape(tf.one_hot(board_state.board, 3), (1, -1))
+    qs = self.model.predict(x)[0]
+    return qs
+
+  def update(self, board_state, action, new_board_state, verbose=False):
+    x = tf.reshape(tf.one_hot(board_state.board, 3), (1, -1))
+    y = np.zeros((1, 9), np.float32)
+    y[0, action] = new_board_state.reward + self.gamma * np.max(self.quality_function(new_board_state))
+    class_weight = dict((a, int(a == action)) for a in range(9))
+    self.model.train_on_batch(x, y, class_weight=class_weight)      
+
+      
 class EpsilonAgent(Agent):
   """Esilon-greedy agent which explores the space randomly with probability epsilon. Otherwise, it follows the q function."""
-  def __init__(self, *args, epsilon=0.1, **kwargs):
+  def __init__(self, *args, epsilon=0.5, **kwargs):
     super().__init__(*args, **kwargs)
     self.epsilon = epsilon
 
@@ -185,6 +225,10 @@ class EpsilonAgent(Agent):
 
 
 class EpsilonQAgent(EpsilonAgent, QAgent):
+  pass
+
+
+class EpsilonNeuralAgent(EpsilonAgent, NeuralAgent):
   pass
 
 
@@ -370,6 +414,12 @@ class Game(object):
   def train(self, games=1, verbose=False):
     wins = np.zeros(3, np.int)
     for game in range(games):
+      if game == games // 2:
+        for agent in self.agents:
+          if issubclass(type(agent), EpsilonAgent):
+            agent.epsilon *= 0.1
+          
+      
       if game > 0 and game % 10 == 0:
         self.report_wins(game, wins)
 
@@ -421,13 +471,20 @@ if __name__ == '__main__':
   random_agent = RandomAgent()
   user = UserAgent()
 
-  if True:
-    qagent = QAgent()
-    game = Game(qagent)
-    game.train(1000)
-    qagent.save('qagent.pkl')
-  else:
-    qagent = QAgent.load('qagent.pkl')
+  # if True:
+  #   qagent = QAgent()
+  #   game = Game(qagent)
+  #   game.train(1000)
+  #   qagent.save('qagent.pkl')
+  # else:
+  #   qagent = QAgent.load('qagent.pkl')
 
-  Game(qagent, user).train(100, verbose=True)
+  agent = EpsilonNeuralAgent()
+  opponent = EpsilonNeuralAgent()
+  game = Game(agent, opponent)
+  game.train(1000)
+  agent.save('agent')
+  opponent.save('opponent')
+
+  Game(user, opponent).train(100, verbose=True)
   
