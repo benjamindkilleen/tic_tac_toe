@@ -28,3 +28,4 @@ or the letters q, w, e, a, s, d, z, x, c, which correspond to the same moves:
 -----------
  z | x | c
 ```
+changes
